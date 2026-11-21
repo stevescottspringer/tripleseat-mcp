@@ -21,6 +21,28 @@ const TOKEN_URL = "https://api.tripleseat.com/oauth2/token";
 
 // Authorize endpoint is on login.tripleseat.com
 const AUTHORIZE_URL = "https://login.tripleseat.com/oauth2/authorize";
+// Itemized TripleSeat scopes (TripleSeat has no "read_write" scope).
+// Must be a subset of the scopes enabled on the OAuth app in TripleSeat.
+// Read and write for the core sales objects, write for tasks, read-only for
+// sites, locations and users. No payments, menus, webhooks or user writes.
+const TRIPLESEAT_SCOPES = [
+  "events:read",
+  "events:write",
+  "leads:read",
+  "leads:write",
+  "contacts:read",
+  "contacts:write",
+  "bookings:read",
+  "bookings:write",
+  "accounts:read",
+  "accounts:write",
+  "notes:read",
+  "notes:write",
+  "tasks:write",
+  "sites:read",
+  "locations:read",
+  "users:read",
+].join(" ");
 
 interface TokenResponse {
   access_token: string;
@@ -58,7 +80,7 @@ export function getAuthorizeUrl(redirectUri: string): string {
     client_id: clientId,
     redirect_uri: redirectUri,
     response_type: "code",
-    scope: "read_write",
+    scope: TRIPLESEAT_SCOPES,
   });
   return AUTHORIZE_URL + "?" + params.toString();
 }
