@@ -781,7 +781,7 @@ const TOOLS = [
   },
   {
     name: "list_locations",
-    description: "List all venue locations and their rooms/areas. Returns Knotting Hill Place and Brighton Abbey with spaces and capacities.",
+    description: "List all venue locations and their rooms/areas. Returns the Gravitas Beverly Hills location with its rooms, buyout groupings and capacities.",
     inputSchema: { type: "object", properties: {} }
   },
   {
@@ -1301,14 +1301,17 @@ const SERVER_INFO = {
   version: "1.0.0",
 };
 
-const SERVER_INSTRUCTIONS = `You are connected to TripleSeat, a CRM and event management platform for wedding and event venues. This server provides live read AND write access to event data, leads, bookings, contacts, accounts, and venue locations.
+const SERVER_INSTRUCTIONS = `You are connected to TripleSeat, the CRM and event management platform used by Gravitas Beverly Hills, a Members Only Club. This server provides live read AND write access to event data, leads, bookings, contacts, accounts, and venue locations.
 
 Key context for this installation:
-- Two venues: Knotting Hill Place and Brighton Abbey (both in the DFW area, ~10 minutes apart)
-- The team handles ~700 inbound leads per month, booking 40-50 weddings
+- One venue: Gravitas Beverly Hills, a Members Only Club at 435 N Camden Dr, Beverly Hills, CA (TripleSeat location "Gravitas", one site)
+- Level 1 rooms: Garden Dining Room, Garden Lounge, Garden Lounge DR, The Gallery, The Gallery Patio, The Vault
+- Level 2 rooms: The Loft, Loft Landing, Bar Three, and the GEM rooms (Emerald Room, Pearl Room, Ruby Room, Onyx Studio)
+- Buyout rooms group these: Full Buyout, First Floor Buyout, Second Floor Buyout. "Gravitas Programming" holds the club's own programming events
+- Events are private events and buyouts: corporate parties, member celebrations, galas and mitzvahs
 - Events always have at least: a booking, account, contact, location, and room
 - Financial data is available on events and bookings when requested
-- Use location IDs to filter results by venue when the user asks about a specific property
+- Use room IDs (from list_locations) when the user asks about a specific room
 
 IMPORTANT — Response size management:
 - Search and list tools return SUMMARY fields only (id, name, dates, status, location) to conserve context window
@@ -1329,7 +1332,7 @@ When answering questions:
 - Be specific with dates, names, and numbers pulled from the data
 - Flag any missing or incomplete fields — data quality visibility is a feature
 - If a search returns no results, suggest broadening the query
-- For availability checks, always check both venues unless told otherwise`;
+- For availability checks, check the specific rooms requested, and remember a buyout room blocks the rooms inside it`;
 
 // ── JSON-RPC Handler ──
 function jsonrpcResponse(id: any, result: any) {
