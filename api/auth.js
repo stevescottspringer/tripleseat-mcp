@@ -32,22 +32,22 @@ const AUTHORIZE_URL = "https://login.tripleseat.com/oauth2/authorize";
 // Read and write for the core sales objects, write for tasks, read-only for
 // sites, locations and users. No payments, menus, webhooks or user writes.
 const TRIPLESEAT_SCOPES = [
-  "events:read",
-  "events:write",
-  "leads:read",
-  "leads:write",
-  "contacts:read",
-  "contacts:write",
-  "bookings:read",
-  "bookings:write",
-  "accounts:read",
-  "accounts:write",
-  "notes:read",
-  "notes:write",
-  "tasks:write",
-  "sites:read",
-  "locations:read",
-  "users:read",
+    "events:read",
+    "events:write",
+    "leads:read",
+    "leads:write",
+    "contacts:read",
+    "contacts:write",
+    "bookings:read",
+    "bookings:write",
+    "accounts:read",
+    "accounts:write",
+    "notes:read",
+    "notes:write",
+    "tasks:write",
+    "sites:read",
+    "locations:read",
+    "users:read",
 ].join(" ");
 let cachedToken = null;
 function getCredentials() {
@@ -61,7 +61,7 @@ function getCredentials() {
 /**
  * Build the authorization URL for the one-time OAuth setup.
  */
-function getAuthorizeUrl(redirectUri) {
+function getAuthorizeUrl(redirectUri, state) {
     const { clientId } = getCredentials();
     const params = new URLSearchParams({
         client_id: clientId,
@@ -69,6 +69,8 @@ function getAuthorizeUrl(redirectUri) {
         response_type: "code",
         scope: TRIPLESEAT_SCOPES,
     });
+    if (state)
+        params.set("state", state);
     return AUTHORIZE_URL + "?" + params.toString();
 }
 /**

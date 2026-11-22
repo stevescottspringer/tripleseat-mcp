@@ -157,5 +157,15 @@ async function migrate() {
       `);
         }
     }
+    // BOOK'D Reader feed keys (only a SHA-256 hash of each key is stored)
+    await query(`
+    CREATE TABLE IF NOT EXISTS bookd_feed_keys (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      key_hash TEXT UNIQUE NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW(),
+      last_used_at TIMESTAMPTZ,
+      revoked_at TIMESTAMPTZ
+    )
+  `);
     console.log("[DB] Schema migration complete");
 }

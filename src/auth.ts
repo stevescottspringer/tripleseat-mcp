@@ -74,7 +74,7 @@ function getCredentials() {
 /**
  * Build the authorization URL for the one-time OAuth setup.
  */
-export function getAuthorizeUrl(redirectUri: string): string {
+export function getAuthorizeUrl(redirectUri: string, state?: string): string {
   const { clientId } = getCredentials();
   const params = new URLSearchParams({
     client_id: clientId,
@@ -82,6 +82,7 @@ export function getAuthorizeUrl(redirectUri: string): string {
     response_type: "code",
     scope: TRIPLESEAT_SCOPES,
   });
+  if (state) params.set("state", state);
   return AUTHORIZE_URL + "?" + params.toString();
 }
 

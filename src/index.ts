@@ -7,6 +7,7 @@
  */
 
 import express from "express";
+import crypto from "node:crypto";
 import cookieParser from "cookie-parser";
 import {
   hasCredentials,
@@ -16,7 +17,16 @@ import {
   storeTokens,
 } from "./auth.js";
 import { tripleseatGet, tripleseatPost, tripleseatPut } from "./tripleseat.js";
-import { oauthTokenAuth } from "./middleware.js";
+import { oauthTokenAuth, adminAuth } from "./middleware.js";
+import {
+  bookdConfigured,
+  bookdAuthorizeUrl,
+  bookdExchangeCode,
+  bookdStatus,
+  bookdEvents,
+  createFeedKey,
+  feedKeyValid,
+} from "./bookd.js";
 import { adminRouter } from "./admin/routes.js";
 import { logToolCall } from "./usage.js";
 import { migrate } from "./db.js";
@@ -419,71 +429,191 @@ app.post("/account/change-password", async (req, res) => {
 });
 
 // ── TripleSeat OAuth Setup Routes (one-time) ──
+// Admin sign-in required, and a one-time state value guards the callback.
 
-app.get("/auth/login", (req, res) => {
-  const host = req.headers.host || "tripleseat-mcp.vercel.app";
+const OAUTH_STATE_COOKIE = "ts_oauth_state";
+
+function baseUrl(req: express.Request): string {
+  const host = req.headers.host || "tripleseat-mcp-psi.vercel.app";
   const protocol = req.headers["x-forwarded-proto"] || "https";
-  const redirectUri = protocol + "://" + host + "/auth/callback";
-  const authorizeUrl = getAuthorizeUrl(redirectUri);
-  res.redirect(authorizeUrl);
+  return protocol + "://" + host;
+}
+
+function newOAuthState(res: express.Response, purpose: string): string {
+  const state = purpose + "." + crypto.randomBytes(24).toString("base64url");
+  res.cookie(OAUTH_STATE_COOKIE, state, {
+    httpOnly: true,
+    secure: process.env.VERCEL === "1",
+    sameSite: "lax",
+    maxAge: 10 * 60 * 1000,
+    path: "/auth",
+  });
+  return state;
+}
+
+function checkOAuthState(req: express.Request, res: express.Response, purpose: string): boolean {
+  const expected = req.cookies?.[OAUTH_STATE_COOKIE] as string | undefined;
+  const got = req.query.state as string | undefined;
+  res.clearCookie(OAUTH_STATE_COOKIE, { path: "/auth" });
+  if (!expected || !got || !expected.startsWith(purpose + ".")) return false;
+  const a = Buffer.from(expected);
+  const b = Buffer.from(got);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function escapeHtml(text: string): string {
+  return String(text).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" } as Record<string, string>)[c]
+  );
+}
+
+function setupPage(title: string, body: string): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(title)}</title>
+<style>
+  body { font-family: -apple-system, sans-serif; max-width: 680px; margin: 40px auto; padding: 0 20px; background: #0a0a0a; color: #ededed; line-height: 1.5; }
+  h1 { font-size: 22px; } .ok { color: #00c853; } .warn { color: #ffb300; }
+  .box { background: #141414; border: 1px solid #262626; padding: 16px; border-radius: 8px; margin: 16px 0; }
+  .key { font-family: monospace; font-size: 14px; word-break: break-all; user-select: all; }
+  button, .btn { background: #ededed; color: #0a0a0a; border: 0; padding: 10px 16px; border-radius: 6px; font-size: 15px; cursor: pointer; text-decoration: none; display: inline-block; }
+  a { color: #4ea1ff; }
+</style></head><body>${body}</body></html>`;
+}
+
+app.get("/auth/login", adminAuth, (req, res) => {
+  const state = newOAuthState(res, "connector");
+  res.redirect(getAuthorizeUrl(baseUrl(req) + "/auth/callback", state));
 });
 
-app.get("/auth/callback", async (req, res) => {
+app.get("/auth/callback", adminAuth, async (req, res) => {
   const code = req.query.code as string;
   const error = req.query.error as string;
 
   if (error) {
-    res.status(400).send(
-      "<h1>Authorization Failed</h1><p>Error: " + error + "</p>" +
-      "<p>" + (req.query.error_description || "") + "</p>"
-    );
+    res.status(400).send(setupPage("Authorization failed", `<h1>Authorization failed</h1><p>${escapeHtml(error)}</p>`));
     return;
   }
-
+  if (!checkOAuthState(req, res, "connector")) {
+    res.status(400).send(setupPage("Sign-in expired", `<h1>That sign-in link expired</h1><p><a href="/auth/login">Start again</a>.</p>`));
+    return;
+  }
   if (!code) {
-    res.status(400).send("<h1>Missing authorization code</h1>");
+    res.status(400).send(setupPage("Missing code", "<h1>Missing authorization code</h1>"));
     return;
   }
 
   try {
-    const host = req.headers.host || "tripleseat-mcp.vercel.app";
-    const protocol = req.headers["x-forwarded-proto"] || "https";
-    const redirectUri = protocol + "://" + host + "/auth/callback";
-
-    const tokens = await exchangeCodeForTokens(code, redirectUri);
-
-    try {
-      await storeTokens(tokens);
-      console.log("[Auth Callback] Tokens stored in database successfully");
-    } catch (storeErr: any) {
-      console.error("[Auth Callback] Failed to store tokens in DB:", storeErr.message);
-    }
-
-    res.send(`<!DOCTYPE html>
-<html><head><title>TripleSeat MCP - OAuth Setup Complete</title>
-<style>
-  body { font-family: -apple-system, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; background: #0a0a0a; color: #ededed; }
-  .success { color: #00c853; }
-  .token-box { background: #141414; border: 1px solid #262626; padding: 16px; border-radius: 8px; word-break: break-all; font-family: monospace; font-size: 14px; margin: 12px 0; }
-  .step { margin: 20px 0; padding: 16px; background: #141414; border-left: 4px solid #0070f3; border-radius: 4px; }
-  code { background: #262626; padding: 2px 6px; border-radius: 4px; }
-  a { color: #0070f3; }
-</style></head>
-<body>
-  <h1 class="success">OAuth Setup Complete!</h1>
-  <p>TripleSeat authorized the Stormbreaker app.</p>
-  <h3>Refresh Token:</h3>
-  <div class="token-box">${tokens.refresh_token || "NOT PROVIDED"}</div>
-  <div class="step">
-    <p><strong>1.</strong> Go to <a href="https://vercel.com/mcretzman-9359s-projects/tripleseat-mcp/settings/environment-variables" target="_blank">Vercel Environment Variables</a></p>
-    <p><strong>2.</strong> Set <code>TRIPLESEAT_REFRESH_TOKEN</code> to the refresh token above</p>
-    <p><strong>3.</strong> Redeploy the project</p>
-  </div>
-</body></html>`);
+    const tokens = await exchangeCodeForTokens(code, baseUrl(req) + "/auth/callback");
+    await storeTokens(tokens);
+    // Tokens are stored in the database only. They are never shown on screen.
+    res.send(setupPage("Tripleseat connected", `<h1 class="ok">Tripleseat is connected</h1>
+      <p>The connector's Tripleseat sign-in is saved and refreshes on its own. You can close this page.</p>`));
   } catch (err: any) {
-    res.status(500).send(
-      "<h1>Token Exchange Failed</h1><pre>" + err.message + "</pre>"
-    );
+    console.error("[Auth Callback] Token exchange failed:", err.message);
+    res.status(500).send(setupPage("Token exchange failed", "<h1>Token exchange failed</h1><p>Check the Vercel logs, then try again.</p>"));
+  }
+});
+
+// ── BOOK'D Reader (read-only Tripleseat app for the room calendar) ──
+
+app.get("/auth/bookd", adminAuth, async (_req, res) => {
+  try {
+    const s = await bookdStatus();
+    const lines = [
+      s.configured ? `<p class="ok">App credentials are set in Vercel.</p>` : `<p class="warn">BOOKD_TS_CLIENT_ID and BOOKD_TS_CLIENT_SECRET are not set in Vercel yet.</p>`,
+      s.authorized ? `<p class="ok">Tripleseat is authorized${s.updated_at ? " (tokens last refreshed " + escapeHtml(new Date(s.updated_at).toUTCString()) + ")" : ""}.</p>` : `<p class="warn">Tripleseat has not been authorized yet.</p>`,
+      `<p>${s.keys > 0 ? "A feed key is active." : "No feed key yet."}</p>`,
+    ].join("");
+    const actions = !s.configured
+      ? ""
+      : !s.authorized
+      ? `<p><a class="btn" href="/auth/bookd/login">Authorize BOOK'D Reader in Tripleseat</a></p>`
+      : `<p><a href="/auth/bookd/login">Authorize again</a></p>
+         <form method="post" action="/auth/bookd/key"><button type="submit">${s.keys > 0 ? "Replace the feed key" : "Create the feed key"}</button></form>
+         ${s.keys > 0 ? `<p>Replacing the key stops the old one at once, so update the GitHub secret right after.</p>` : ""}`;
+    res.send(setupPage("BOOK'D Reader", `<h1>BOOK'D Reader</h1><div class="box">${lines}</div>${actions}`));
+  } catch (err: any) {
+    console.error("[BOOK'D] Status failed:", err.message);
+    res.status(500).send(setupPage("BOOK'D Reader", "<h1>Could not read BOOK'D status</h1>"));
+  }
+});
+
+app.get("/auth/bookd/login", adminAuth, (req, res) => {
+  if (!bookdConfigured()) {
+    res.redirect("/auth/bookd");
+    return;
+  }
+  const state = newOAuthState(res, "bookd");
+  res.redirect(bookdAuthorizeUrl(baseUrl(req) + "/auth/bookd/callback", state));
+});
+
+app.get("/auth/bookd/callback", adminAuth, async (req, res) => {
+  const code = req.query.code as string;
+  const error = req.query.error as string;
+  if (error) {
+    res.status(400).send(setupPage("Authorization failed", `<h1>Authorization failed</h1><p>${escapeHtml(error)}</p><p><a href="/auth/bookd">Back</a></p>`));
+    return;
+  }
+  if (!checkOAuthState(req, res, "bookd")) {
+    res.status(400).send(setupPage("Sign-in expired", `<h1>That sign-in link expired</h1><p><a href="/auth/bookd">Start again</a>.</p>`));
+    return;
+  }
+  if (!code) {
+    res.status(400).send(setupPage("Missing code", "<h1>Missing authorization code</h1>"));
+    return;
+  }
+  try {
+    await bookdExchangeCode(code, baseUrl(req) + "/auth/bookd/callback");
+    res.redirect("/auth/bookd");
+  } catch (err: any) {
+    console.error("[BOOK'D] Token exchange failed:", err.message);
+    res.status(500).send(setupPage("Token exchange failed", `<h1>Token exchange failed</h1><p><a href="/auth/bookd">Back</a></p>`));
+  }
+});
+
+app.post("/auth/bookd/key", adminAuth, async (_req, res) => {
+  try {
+    const s = await bookdStatus();
+    if (!s.authorized) {
+      res.redirect("/auth/bookd");
+      return;
+    }
+    const key = await createFeedKey();
+    res.set("Cache-Control", "no-store");
+    res.send(setupPage("BOOK'D feed key", `<h1>BOOK'D feed key</h1>
+      <p>Copy this now. It is shown only once and is not stored anywhere readable.</p>
+      <div class="box key">${escapeHtml(key)}</div>
+      <p>Paste it into GitHub as the repository secret <b>BOOKD_FEED_KEY</b> on the room calendar repo.</p>
+      <p><a href="/auth/bookd">Done</a></p>`));
+  } catch (err: any) {
+    console.error("[BOOK'D] Key creation failed:", err.message);
+    res.status(500).send(setupPage("BOOK'D feed key", "<h1>Could not create a key</h1>"));
+  }
+});
+
+// Read-only feed for BOOK'D's daily build. Needs: Authorization: Bearer <feed key>.
+app.get("/bookd/events", async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  const auth = req.headers.authorization || "";
+  const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : undefined;
+  if (!(await feedKeyValid(key))) {
+    res.status(401).json({ error: "unauthorized" });
+    return;
+  }
+  const dateRe = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
+  const from = String(req.query.from || "");
+  const to = String(req.query.to || "");
+  if (!dateRe.test(from) || !dateRe.test(to)) {
+    res.status(400).json({ error: "from and to are required as MM/DD/YYYY" });
+    return;
+  }
+  try {
+    const events = await bookdEvents(from, to);
+    res.json({ generated_at: new Date().toISOString(), from, to, count: events.length, events });
+  } catch (err: any) {
+    console.error("[BOOK'D] Feed failed:", err.message);
+    res.status(502).json({ error: "tripleseat_unavailable" });
   }
 });
 
@@ -976,8 +1106,22 @@ async function executeTool(name: string, args: any): Promise<string> {
       params.sort_direction = "asc";
       if (args.location_id) params.location_id = args.location_id;
       if (args.include_financials) params.show_financial = "true";
-      const { data } = await tripleseatGet("/events/search", params);
-      const result = summarizeList(data, EVENT_SUMMARY_FIELDS);
+      // Tripleseat returns search results a page at a time, so read every page
+      // (the old version returned page 1 only and silently dropped later events).
+      const all: any[] = [];
+      const seen = new Set<number>();
+      for (let page = 1; page <= 20; page++) {
+        const { data } = await tripleseatGet("/events/search", { ...params, page: String(page) });
+        const items: any[] = Array.isArray(data) ? data : (data as any)?.results || (data as any)?.data || [];
+        let fresh = 0;
+        for (const item of items) {
+          if (item?.id && !seen.has(item.id)) { seen.add(item.id); all.push(item); fresh++; }
+        }
+        const totalPages = (data as any)?.total_pages;
+        if (items.length === 0 || fresh === 0 || (typeof totalPages === "number" && page >= totalPages)) break;
+      }
+      all.sort((a, b) => new Date(a.event_start).getTime() - new Date(b.event_start).getTime());
+      const result = summarizeList(all, [...EVENT_SUMMARY_FIELDS, "deleted_at"]);
       return truncateResponse(JSON.stringify(result), name);
     }
     case "check_availability": {
