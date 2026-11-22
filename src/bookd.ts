@@ -238,9 +238,27 @@ function roomNames(ev: any): string[] | null {
   return ev.rooms.map((r: any) => String(r?.name || "").trim()).filter(Boolean);
 }
 
+function toFeedEvent(ev: any): FeedEvent | null {
+  if (!ev || ev.deleted_at) return null;
+  const status = String(ev.status || "").toUpperCase();
+  if (status === "LOST") return null;
+  return {
+    id: ev.id,
+    name: ev.name,
+    status,
+    start: ev.event_start,
+    end: ev.event_end,
+    rooms: roomNames(ev) || [],
+    guest_count: ev.guest_count ?? null,
+    location_id: ev.location_id ?? null,
+    updated_at: ev.updated_at ?? null,
+  };
+}
+
 /**
  * Events for BOOK'D between two dates (MM/DD/YYYY), Lost and deleted events left out.
- * Fetches an event's full record only when the search result has no rooms.
+ * When a search result lacks its rooms or its deleted flag, the full record is read,
+ * four at a time to stay under Tripleseat's 10 requests a second.
  */
 export async function bookdEvents(from: string, to: string): Promise<FeedEvent[]> {
   const raw = await searchAllEvents({
@@ -250,33 +268,28 @@ export async function bookdEvents(from: string, to: string): Promise<FeedEvent[]
     sort_direction: "asc",
   });
 
-  const out: FeedEvent[] = [];
-  for (const base of raw) {
-    let ev = base;
+  const ready: any[] = [];
+  const needDetail: number[] = [];
+  for (const ev of raw) {
     if (ev.deleted_at) continue;
     if (String(ev.status || "").toUpperCase() === "LOST") continue;
-
-    let rooms = roomNames(ev);
-    if (rooms === null) {
-      const detail = await bookdGet(`/events/${ev.id}`);
-      ev = detail?.event || detail;
-      if (ev?.deleted_at) continue;
-      if (String(ev?.status || "").toUpperCase() === "LOST") continue;
-      rooms = roomNames(ev) || [];
-      await new Promise((r) => setTimeout(r, 120)); // stay well under 10 requests a second
-    }
-
-    out.push({
-      id: ev.id,
-      name: ev.name,
-      status: String(ev.status || "").toUpperCase(),
-      start: ev.event_start,
-      end: ev.event_end,
-      rooms,
-      guest_count: ev.guest_count ?? null,
-      location_id: ev.location_id ?? null,
-      updated_at: ev.updated_at ?? null,
-    });
+    if (roomNames(ev) === null || !("deleted_at" in ev)) needDetail.push(ev.id);
+    else ready.push(ev);
   }
-  return out;
+
+  for (let i = 0; i < needDetail.length; i += 4) {
+    const batch = await Promise.all(
+      needDetail.slice(i, i + 4).map(async (id) => {
+        const detail = await bookdGet(`/events/${id}`);
+        return detail?.event || detail;
+      })
+    );
+    ready.push(...batch);
+    if (i + 4 < needDetail.length) await new Promise((r) => setTimeout(r, 450));
+  }
+
+  return ready
+    .map(toFeedEvent)
+    .filter((e): e is FeedEvent => e !== null)
+    .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
 }
