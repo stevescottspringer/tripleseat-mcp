@@ -18,7 +18,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.BOOKD_SCOPES = void 0;
+exports.GEM_ROOMS = exports.BOOKD_SCOPES = void 0;
 exports.bookdConfigured = bookdConfigured;
 exports.bookdAuthorizeUrl = bookdAuthorizeUrl;
 exports.bookdExchangeCode = bookdExchangeCode;
@@ -28,6 +28,12 @@ exports.createFeedKey = createFeedKey;
 exports.feedKeyValid = feedKeyValid;
 exports.searchAllEvents = searchAllEvents;
 exports.bookdEvents = bookdEvents;
+exports.gemRoom = gemRoom;
+exports.localStamp = localStamp;
+exports.recordPvBookings = recordPvBookings;
+exports.listPvBookings = listPvBookings;
+exports.saveConflicts = saveConflicts;
+exports.bookdStatusForRoutine = bookdStatusForRoutine;
 const node_crypto_1 = __importDefault(require("node:crypto"));
 const db_js_1 = require("./db.js");
 const TOKEN_URL = "https://api.tripleseat.com/oauth2/token";
@@ -261,4 +267,204 @@ async function bookdEvents(from, to) {
         .map(toFeedEvent)
         .filter((e) => e !== null)
         .sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
+}
+// ── PeopleVine GEM bookings from email (for BOOK'D) ──
+//
+// PeopleVine has no API access yet, so BOOK'D learns about member GEM room
+// bookings from PeopleVine's "Room Booking Form" notice emails. An hourly
+// Claude routine reads those emails in Outlook and records each booking here
+// through the bookd_add_peoplevine_gem_bookings tool. BOOK'D's hourly GitHub
+// Action reads them back with GET /bookd/peoplevine (feed key) and posts its
+// double-booking list to POST /bookd/conflicts, which bookd_status returns.
+// None of this touches Tripleseat or PeopleVine.
+exports.GEM_ROOMS = ["Pearl", "Emerald", "Ruby", "Onyx"];
+/** "Emerald Room", "the emerald room", "Onyx Studio" -> "Emerald" / "Onyx"; null if not a GEM room. */
+function gemRoom(name) {
+    const s = String(name || "").toLowerCase().replace(/^the\s+/, "").trim();
+    for (const g of exports.GEM_ROOMS) {
+        const k = g.toLowerCase();
+        if (s === k || s === k + " room" || (g === "Onyx" && s === "onyx studio"))
+            return g;
+    }
+    return null;
+}
+/** "20261121T120000", "2026-11-21T12:00", "11/21/2026 12:00 PM" -> "20261121T120000" (Pacific wall time). */
+function localStamp(value) {
+    const s = String(value || "").trim();
+    let m = s.match(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?$/);
+    if (m)
+        return `${m[1]}${m[2]}${m[3]}T${m[4]}${m[5]}${m[6] || "00"}`;
+    m = s.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/);
+    if (m)
+        return `${m[1]}${m[2]}${m[3]}T${m[4]}${m[5]}${m[6] || "00"}`;
+    m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2})\s*([AaPp])\.?[Mm]\.?$/);
+    if (m) {
+        let h = Number(m[4]) % 12;
+        if (m[6].toLowerCase() === "p")
+            h += 12;
+        const pad = (n) => String(n).padStart(2, "0");
+        return `${m[3]}${pad(m[1])}${pad(m[2])}T${pad(h)}${m[5]}00`;
+    }
+    return null;
+}
+function stampValid(st) {
+    const y = Number(st.slice(0, 4)), mo = Number(st.slice(4, 6)), d = Number(st.slice(6, 8));
+    const h = Number(st.slice(9, 11)), mi = Number(st.slice(11, 13));
+    return y >= 2024 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && h <= 23 && mi <= 59;
+}
+function stampToFeedDate(st) {
+    return `${st.slice(4, 6)}/${st.slice(6, 8)}/${st.slice(0, 4)}`;
+}
+function addDays(feedDate, n) {
+    const [mo, d, y] = feedDate.split("/").map(Number);
+    const t = new Date(Date.UTC(y, mo - 1, d + n));
+    return `${String(t.getUTCMonth() + 1).padStart(2, "0")}/${String(t.getUTCDate()).padStart(2, "0")}/${t.getUTCFullYear()}`;
+}
+/** Tripleseat feed time "11/24/2026 06:00 PM" -> "20261124T180000". */
+function feedToStamp(s) {
+    return localStamp(s);
+}
+function niceTime(st) {
+    let h = Number(st.slice(9, 11));
+    const mi = st.slice(11, 13);
+    const ap = h >= 12 ? "PM" : "AM";
+    h = h % 12 || 12;
+    return mi === "00" ? `${h} ${ap}` : `${h}:${mi} ${ap}`;
+}
+function niceDate(st) {
+    return `${Number(st.slice(4, 6))}/${Number(st.slice(6, 8))}/${st.slice(0, 4)}`;
+}
+/** Which GEM rooms a Tripleseat room name occupies (buyouts included), as in BOOK'D's build. */
+function tsGemRooms(rooms) {
+    const out = new Set();
+    for (const r of rooms) {
+        const s = r.toLowerCase().trim();
+        if (s === "full buyout" || s === "second floor buyout")
+            exports.GEM_ROOMS.forEach((g) => out.add(g));
+        const g = gemRoom(r);
+        if (g)
+            out.add(g);
+    }
+    return [...out];
+}
+const LIVE_STATUSES = new Set(["DEFINITE", "TENTATIVE", "PROSPECT", "CLOSED"]);
+/**
+ * Record GEM bookings read from PeopleVine emails. Rows whose email id is already
+ * recorded are skipped. Returns what was added and, for new bookings, any
+ * Tripleseat event holding the same GEM room at an overlapping time.
+ */
+async function recordPvBookings(items) {
+    if (!Array.isArray(items) || items.length === 0)
+        throw new Error("bookings must be a non-empty list");
+    if (items.length > 100)
+        throw new Error("At most 100 bookings per call");
+    const added = [];
+    const skipped = [];
+    for (const it of items) {
+        const emailId = String(it?.email_id || "").trim();
+        const room = gemRoom(it?.room);
+        const start = localStamp(it?.start);
+        const end = localStamp(it?.end);
+        const status = String(it?.status || "booked").trim().toLowerCase();
+        if (!emailId || emailId.length > 512) {
+            skipped.push({ email_id: emailId, reason: "missing email_id" });
+            continue;
+        }
+        if (!room) {
+            skipped.push({ email_id: emailId, reason: "not a GEM room (Pearl, Emerald, Ruby, Onyx)" });
+            continue;
+        }
+        if (!start || !end || !stampValid(start) || !stampValid(end) || end <= start) {
+            skipped.push({ email_id: emailId, reason: "start/end not readable (use 11/21/2026 12:00 PM or 20261121T120000)" });
+            continue;
+        }
+        if (status !== "booked" && status !== "cancelled") {
+            skipped.push({ email_id: emailId, reason: "status must be booked or cancelled" });
+            continue;
+        }
+        const member = String(it?.member || "").replace(/[\t\r\n]+/g, " ").trim().slice(0, 120);
+        const g = it?.guests === undefined || it?.guests === null || it?.guests === "" ? null : Number(it.guests);
+        const guests = g !== null && Number.isFinite(g) && g >= 0 && g < 10000 ? Math.round(g) : null;
+        const rec = it?.email_received_at ? new Date(String(it.email_received_at)) : null;
+        const received = rec && !isNaN(rec.getTime()) ? rec.toISOString() : null;
+        const row = await (0, db_js_1.queryOne)(`INSERT INTO bookd_pv_bookings (email_id, room, start_local, end_local, member, guests, status, email_received_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (email_id) DO NOTHING
+       RETURNING email_id, room, start_local, end_local, member, guests, status, email_received_at, created_at`, [emailId, room + " Room", start, end, member, guests, status, received]);
+        if (row)
+            added.push(row);
+        else
+            skipped.push({ email_id: emailId, reason: "already recorded" });
+    }
+    // Live double-booking check for the new bookings against Tripleseat (read only).
+    const double_bookings = [];
+    let tripleseat_checked = true;
+    const booked = added.filter((r) => r.status === "booked");
+    if (booked.length) {
+        try {
+            const dates = booked.map((r) => stampToFeedDate(r.start_local)).sort();
+            const events = await bookdEvents(dates[0], addDays(dates[dates.length - 1], 2));
+            for (const r of booked) {
+                const g = gemRoom(r.room);
+                for (const ev of events) {
+                    if (!LIVE_STATUSES.has(ev.status))
+                        continue;
+                    const s = feedToStamp(ev.start), e = feedToStamp(ev.end);
+                    if (!s || !e)
+                        continue;
+                    if (ev.guest_count === 1 && s.slice(9, 13) === "0800" && e.slice(9, 13) === "0930")
+                        continue;
+                    if (!tsGemRooms(ev.rooms).includes(g))
+                        continue;
+                    if (!(r.start_local < e && s < r.end_local))
+                        continue;
+                    double_bookings.push({
+                        date: niceDate(r.start_local),
+                        room: g,
+                        peoplevine: { member: r.member, time: `${niceTime(r.start_local)} to ${niceTime(r.end_local)}` },
+                        tripleseat: { event: ev.name, time: `${niceTime(s)} to ${niceTime(e)}`, status: ev.status },
+                    });
+                }
+            }
+        }
+        catch (err) {
+            tripleseat_checked = false;
+            console.error("[BOOK'D] Double-booking check failed:", err.message);
+        }
+    }
+    const total = await (0, db_js_1.queryOne)(`SELECT COUNT(*) AS n FROM bookd_pv_bookings`);
+    return {
+        added: added.map((r) => ({ email_id: r.email_id, room: r.room, start: r.start_local, end: r.end_local, member: r.member, status: r.status })),
+        skipped,
+        double_bookings,
+        tripleseat_checked,
+        total_recorded: Number(total?.n || 0),
+        note: "BOOK'D picks these up at its next hourly refresh (about 22 minutes past the hour).",
+    };
+}
+async function listPvBookings() {
+    return (0, db_js_1.query)(`SELECT email_id, room, start_local, end_local, member, guests, status, email_received_at, created_at
+     FROM bookd_pv_bookings ORDER BY created_at, email_id`);
+}
+async function saveConflicts(body) {
+    const list = Array.isArray(body?.conflicts) ? body.conflicts : null;
+    if (!list)
+        throw new Error("conflicts list missing");
+    if (JSON.stringify(list).length > 200_000)
+        throw new Error("conflicts list too large");
+    await (0, db_js_1.query)(`INSERT INTO bookd_state (key, value, updated_at) VALUES ('conflicts', $1::jsonb, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = NOW()`, [JSON.stringify({ conflicts: list })]);
+    return list.length;
+}
+async function bookdStatusForRoutine() {
+    const pv = await (0, db_js_1.queryOne)(`SELECT COUNT(*) AS n, MAX(email_received_at) AS newest, MAX(created_at) AS last_added FROM bookd_pv_bookings`);
+    const st = await (0, db_js_1.queryOne)(`SELECT value, updated_at FROM bookd_state WHERE key = 'conflicts'`);
+    return {
+        peoplevine_bookings_recorded: Number(pv?.n || 0),
+        newest_email_received_at: pv?.newest || null,
+        last_recorded_at: pv?.last_added || null,
+        double_bookings: st?.value?.conflicts || [],
+        double_bookings_updated_at: st?.updated_at || null,
+        note: "double_bookings is BOOK'D's own list from its last hourly build; first_seen says when BOOK'D first saw each one.",
+    };
 }

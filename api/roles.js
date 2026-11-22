@@ -29,6 +29,9 @@ const ALL_TOOLS = [
     "list_locations",
     "get_location",
     "list_users",
+    // BOOK'D (the club's room calendar; never touches Tripleseat records)
+    "bookd_status",
+    "bookd_add_peoplevine_gem_bookings",
     // Write tools
     "create_lead",
     "update_lead",
@@ -101,7 +104,7 @@ async function seedDefaultRoles() {
     const defaults = [
         {
             name: "admin",
-            description: "Full access to all 30 tools (read + write)",
+            description: "Full access to all tools (read + write)",
             allowed_tools: [...ALL_TOOLS],
         },
         {

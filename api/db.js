@@ -167,5 +167,27 @@ async function migrate() {
       revoked_at TIMESTAMPTZ
     )
   `);
+    // BOOK'D: GEM bookings read from PeopleVine's booking emails
+    await query(`
+    CREATE TABLE IF NOT EXISTS bookd_pv_bookings (
+      email_id TEXT PRIMARY KEY,
+      room TEXT NOT NULL,
+      start_local TEXT NOT NULL,
+      end_local TEXT NOT NULL,
+      member TEXT DEFAULT '',
+      guests INTEGER,
+      status TEXT NOT NULL DEFAULT 'booked',
+      email_received_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
+    // BOOK'D: small shared state (the build's double-booking list)
+    await query(`
+    CREATE TABLE IF NOT EXISTS bookd_state (
+      key TEXT PRIMARY KEY,
+      value JSONB NOT NULL,
+      updated_at TIMESTAMPTZ DEFAULT NOW()
+    )
+  `);
     console.log("[DB] Schema migration complete");
 }

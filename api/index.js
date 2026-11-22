@@ -533,8 +533,77 @@ app.get("/bookd/events", async (req, res) => {
         res.status(502).json({ error: "tripleseat_unavailable" });
     }
 });
+async function feedAuthorized(req) {
+    const auth = req.headers.authorization || "";
+    const key = auth.startsWith("Bearer ") ? auth.slice(7).trim() : undefined;
+    return (0, bookd_js_1.feedKeyValid)(key);
+}
+// PeopleVine GEM bookings recorded from email, for BOOK'D's hourly build. Feed key required.
+app.get("/bookd/peoplevine", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!(await feedAuthorized(req))) {
+        res.status(401).json({ error: "unauthorized" });
+        return;
+    }
+    try {
+        const rows = await (0, bookd_js_1.listPvBookings)();
+        res.json({ generated_at: new Date().toISOString(), count: rows.length, bookings: rows });
+    }
+    catch (err) {
+        console.error("[BOOK'D] PeopleVine list failed:", err.message);
+        res.status(500).json({ error: "unavailable" });
+    }
+});
+// BOOK'D's build posts its double-booking list here so the hourly routine can read it. Feed key required.
+app.post("/bookd/conflicts", async (req, res) => {
+    res.set("Cache-Control", "no-store");
+    if (!(await feedAuthorized(req))) {
+        res.status(401).json({ error: "unauthorized" });
+        return;
+    }
+    try {
+        const n = await (0, bookd_js_1.saveConflicts)(req.body);
+        res.json({ ok: true, count: n });
+    }
+    catch (err) {
+        res.status(400).json({ error: err.message });
+    }
+});
 // ── Tool Definitions ──
 const TOOLS = [
+    {
+        name: "bookd_add_peoplevine_gem_bookings",
+        description: "BOOK'D only (the club's room-availability calendar). Records GEM room bookings (Pearl, Emerald, Ruby, Onyx) read from PeopleVine's \"Room Booking Form\" notice emails, so BOOK'D shows them at its next hourly refresh. It writes only to BOOK'D's own list on this server, never to Tripleseat or PeopleVine, so it needs no per-record confirmation; it exists for the hourly BOOK'D PeopleVine routine. Bookings whose email_id is already recorded are skipped, so re-sending is safe. Returns what was added and, for each new booking, any Tripleseat event that holds the same GEM room at an overlapping time (double_bookings).",
+        inputSchema: {
+            type: "object",
+            properties: {
+                bookings: {
+                    type: "array",
+                    description: "One entry per booking email",
+                    items: {
+                        type: "object",
+                        properties: {
+                            room: { type: "string", description: "Room from the email's Booking: line, e.g. \"Emerald Room\"" },
+                            start: { type: "string", description: "Start in Pacific time, as in the email: \"11/21/2026 12:00 PM\" (or 20261121T120000)" },
+                            end: { type: "string", description: "End in Pacific time, same format" },
+                            member: { type: "string", description: "Member name (from CONTACT INFO, or \"by <Name>\" in the subject)" },
+                            guests: { type: "number", description: "Answer to \"How many guests will be attending?\", if given" },
+                            email_id: { type: "string", description: "The email's message id (Outlook id or internetMessageId)" },
+                            email_received_at: { type: "string", description: "When the email arrived (ISO 8601)" },
+                            status: { type: "string", enum: ["booked", "cancelled"], description: "booked (default), or cancelled for a cancellation notice" }
+                        },
+                        required: ["room", "start", "end", "email_id"]
+                    }
+                }
+            },
+            required: ["bookings"]
+        }
+    },
+    {
+        name: "bookd_status",
+        description: "BOOK'D only (the club's room-availability calendar). Read only. Returns how many PeopleVine GEM bookings are recorded and when the newest booking email arrived, plus BOOK'D's current double-booking list (GEM rooms booked in both PeopleVine and Tripleseat at overlapping times) with first_seen for each.",
+        inputSchema: { type: "object", properties: {} }
+    },
     {
         name: "get_event",
         description: "Get full event details from TripleSeat by event ID. Returns BEO data, packages, vendors, status, and optionally financial details.",
@@ -1163,6 +1232,13 @@ async function executeTool(name, args) {
             const { data } = await (0, tripleseat_js_1.tripleseatGet)("/users");
             return JSON.stringify(data, null, 2);
         }
+        // ── BOOK'D (own list only; never touches Tripleseat records) ──
+        case "bookd_add_peoplevine_gem_bookings": {
+            return JSON.stringify(await (0, bookd_js_1.recordPvBookings)(args.bookings), null, 2);
+        }
+        case "bookd_status": {
+            return JSON.stringify(await (0, bookd_js_1.bookdStatusForRoutine)(), null, 2);
+        }
         // ── Write Tools ──
         case "create_lead": {
             const { lead_id, ...leadFields } = args;
@@ -1268,6 +1344,7 @@ IMPORTANT — Write operations safety:
 - When creating events, all required fields must be provided: name, event_start, event_end, account_id, contact_id, location_id, room_ids, and status
 - When creating leads, first_name, last_name, email_address, and phone_number are required
 - Task creation requires body, due_date, priority, task_type_id, assignee_ids, and site_id
+- Exception: the two bookd_ tools belong to BOOK'D, the club's room calendar, and never change Tripleseat. bookd_add_peoplevine_gem_bookings only adds to BOOK'D's own list and is run by the hourly BOOK'D routine without per-record confirmation
 
 When answering questions:
 - Be specific with dates, names, and numbers pulled from the data
