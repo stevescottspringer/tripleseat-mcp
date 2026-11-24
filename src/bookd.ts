@@ -206,6 +206,8 @@ export interface FeedEvent {
   guest_count: number | null;
   location_id: number | null;
   updated_at: string | null;
+  owner_id: number | null;
+  owner: string | null;
 }
 
 /** Page through Tripleseat's event search until a page comes back empty. */
@@ -238,6 +240,47 @@ function roomNames(ev: any): string[] | null {
   return ev.rooms.map((r: any) => String(r?.name || "").trim()).filter(Boolean);
 }
 
+/** Event owners' names by Tripleseat user id, kept while the server stays warm. */
+const ownerNames = new Map<number, string>();
+
+function personName(u: any): string | null {
+  if (!u || typeof u !== "object") return null;
+  const name = [u.first_name, u.last_name].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
+  return name || null;
+}
+
+function ownerId(ev: any): number | null {
+  const id = Number(ev?.owned_by ?? ev?.owner?.id);
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
+/**
+ * Names the owner of each event. BOOK'D Reader may only read events, so a name comes
+ * from an event record's owner; for an owner no record here names, one of their events
+ * is read in full (once per owner while the server stays warm).
+ */
+async function nameOwners(events: any[]): Promise<void> {
+  for (const ev of events) {
+    const id = ownerId(ev);
+    const name = personName(ev?.owner);
+    if (id && name) ownerNames.set(id, name);
+  }
+  const missing = new Map<number, number>();
+  for (const ev of events) {
+    const id = ownerId(ev);
+    if (id && !ownerNames.has(id) && !missing.has(id)) missing.set(id, ev.id);
+  }
+  for (const [id, eventId] of [...missing].slice(0, 20)) {
+    try {
+      const detail = await bookdGet(`/events/${eventId}`);
+      const name = personName((detail?.event || detail)?.owner);
+      if (name) ownerNames.set(id, name);
+    } catch {
+      // the owner stays unnamed; the event still shows
+    }
+  }
+}
+
 function toFeedEvent(ev: any): FeedEvent | null {
   if (!ev || ev.deleted_at) return null;
   const status = String(ev.status || "").toUpperCase();
@@ -252,6 +295,8 @@ function toFeedEvent(ev: any): FeedEvent | null {
     guest_count: ev.guest_count ?? null,
     location_id: ev.location_id ?? null,
     updated_at: ev.updated_at ?? null,
+    owner_id: ownerId(ev),
+    owner: (ownerId(ev) && ownerNames.get(ownerId(ev) as number)) || personName(ev.owner),
   };
 }
 
@@ -287,6 +332,8 @@ export async function bookdEvents(from: string, to: string): Promise<FeedEvent[]
     ready.push(...batch);
     if (i + 4 < needDetail.length) await new Promise((r) => setTimeout(r, 450));
   }
+
+  await nameOwners(ready);
 
   return ready
     .map(toFeedEvent)

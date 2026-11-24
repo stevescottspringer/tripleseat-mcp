@@ -212,6 +212,48 @@ function roomNames(ev) {
         return null;
     return ev.rooms.map((r) => String(r?.name || "").trim()).filter(Boolean);
 }
+/** Event owners' names by Tripleseat user id, kept while the server stays warm. */
+const ownerNames = new Map();
+function personName(u) {
+    if (!u || typeof u !== "object")
+        return null;
+    const name = [u.first_name, u.last_name].map((x) => String(x || "").trim()).filter(Boolean).join(" ");
+    return name || null;
+}
+function ownerId(ev) {
+    const id = Number(ev?.owned_by ?? ev?.owner?.id);
+    return Number.isFinite(id) && id > 0 ? id : null;
+}
+/**
+ * Names the owner of each event. BOOK'D Reader may only read events, so a name comes
+ * from an event record's owner; for an owner no record here names, one of their events
+ * is read in full (once per owner while the server stays warm).
+ */
+async function nameOwners(events) {
+    for (const ev of events) {
+        const id = ownerId(ev);
+        const name = personName(ev?.owner);
+        if (id && name)
+            ownerNames.set(id, name);
+    }
+    const missing = new Map();
+    for (const ev of events) {
+        const id = ownerId(ev);
+        if (id && !ownerNames.has(id) && !missing.has(id))
+            missing.set(id, ev.id);
+    }
+    for (const [id, eventId] of [...missing].slice(0, 20)) {
+        try {
+            const detail = await bookdGet(`/events/${eventId}`);
+            const name = personName((detail?.event || detail)?.owner);
+            if (name)
+                ownerNames.set(id, name);
+        }
+        catch {
+            // the owner stays unnamed; the event still shows
+        }
+    }
+}
 function toFeedEvent(ev) {
     if (!ev || ev.deleted_at)
         return null;
@@ -228,6 +270,8 @@ function toFeedEvent(ev) {
         guest_count: ev.guest_count ?? null,
         location_id: ev.location_id ?? null,
         updated_at: ev.updated_at ?? null,
+        owner_id: ownerId(ev),
+        owner: (ownerId(ev) && ownerNames.get(ownerId(ev))) || personName(ev.owner),
     };
 }
 /**
@@ -263,6 +307,7 @@ async function bookdEvents(from, to) {
         if (i + 4 < needDetail.length)
             await new Promise((r) => setTimeout(r, 450));
     }
+    await nameOwners(ready);
     return ready
         .map(toFeedEvent)
         .filter((e) => e !== null)
