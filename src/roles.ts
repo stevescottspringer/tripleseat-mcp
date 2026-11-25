@@ -32,6 +32,7 @@ const ALL_TOOLS = [
   "list_locations",
   "get_location",
   "list_users",
+  "list_notes",
   // BOOK'D (the club's room calendar; never touches Tripleseat records)
   "bookd_status",
   "bookd_add_peoplevine_gem_bookings",
@@ -155,6 +156,7 @@ export async function seedDefaultRoles(): Promise<{ created: string[]; updated: 
         "list_sites",
         "list_locations",
         "get_location",
+        "list_notes",
         "create_lead",
         "update_lead",
         "create_event",
@@ -177,6 +179,7 @@ export async function seedDefaultRoles(): Promise<{ created: string[]; updated: 
         "get_contact",
         "get_account",
         "get_location",
+        "list_notes",
       ],
     },
   ];

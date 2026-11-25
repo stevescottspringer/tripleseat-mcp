@@ -35,6 +35,7 @@ import { adminRouter } from "./admin/routes.js";
 import { logToolCall } from "./usage.js";
 import { migrate } from "./db.js";
 import { seedDefaultRoles } from "./roles.js";
+import { listNotes, NOTE_PARENTS } from "./notes.js";
 import { seedAdminUser, changePassword } from "./users.js";
 import { authenticateUser } from "./users.js";
 import {
@@ -873,6 +874,19 @@ const TOOLS = [
     description: "List all TripleSeat users (team members).",
     inputSchema: { type: "object", properties: {} }
   },
+  {
+    name: "list_notes",
+    description: "Read only. List the Discussions (Tripleseat notes) on one event, lead, booking, account or contact, newest first. Each note gives its author's name, the date and the text (HTML removed). Use it whenever you review a lead or event, since the team talks with clients there.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        parent_type: { type: "string", enum: [...NOTE_PARENTS], description: "Which kind of record the Discussions are on" },
+        record_id: { type: "string", description: "The Tripleseat ID of that event, lead, booking, account or contact" },
+        limit: { type: "number", description: "Most notes to return, newest first (default 20, max 100)", default: 20 }
+      },
+      required: ["parent_type", "record_id"]
+    }
+  },
 
   // ── Write Tools ──
 
@@ -1290,6 +1304,10 @@ async function executeTool(name: string, args: any): Promise<string> {
       const { data } = await tripleseatGet(`/locations/${args.location_id}`);
       return JSON.stringify(data, null, 2);
     }
+    case "list_notes": {
+      const result = await listNotes(args.parent_type, args.record_id, args.limit);
+      return truncateResponse(JSON.stringify(result, null, 2), name);
+    }
     case "list_users": {
       const { data } = await tripleseatGet("/users");
       return JSON.stringify(data, null, 2);
@@ -1403,6 +1421,7 @@ IMPORTANT — Response size management:
 - To get full details (BEOs, packages, vendors, financials), use the get_event, get_lead, get_booking, or get_contact tools with the specific ID
 - Always use the search/list → then get_detail pattern: find items first, then drill into the ones the user cares about
 - Do NOT call get_event/get_lead/get_booking for every item in a list — only fetch full details when the user asks about a specific item
+- Discussions (the team's threads with clients) are not in get_event or get_lead. Read them with list_notes (read only)
 
 IMPORTANT — Write operations safety:
 - ALWAYS confirm with the user before creating or modifying any records
